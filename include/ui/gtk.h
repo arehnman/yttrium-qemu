@@ -51,6 +51,7 @@ typedef struct VirtualGfxConsole {
     int glupdates;
     int x, y, w, h;
     egl_fb guest_fb;
+    egl_fb mailbox_fb;
     egl_fb win_fb;
     egl_fb cursor_fb;
     int cursor_x;
@@ -58,6 +59,9 @@ typedef struct VirtualGfxConsole {
     bool y0_top;
     bool scanout_mode;
     bool has_dmabuf;
+    bool mailbox_valid;
+    bool mailbox_copy_pending;
+    QemuDmaBuf *mailbox_dmabuf;
 #endif
 } VirtualGfxConsole;
 
@@ -160,6 +164,7 @@ extern bool gtk_use_gl_area;
 /* ui/gtk.c */
 void gd_update_windowsize(VirtualConsole *vc);
 void gd_update_monitor_refresh_rate(VirtualConsole *vc, GtkWidget *widget);
+bool gd_gl_mailbox_update(VirtualConsole *vc);
 void gd_hw_gl_flushed(void *vc);
 
 /* ui/gtk-egl.c */

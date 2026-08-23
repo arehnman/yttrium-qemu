@@ -597,17 +597,69 @@ static void gd_gl_release_dmabuf(DisplayChangeListener *dcl,
 #endif
 }
 
+bool gd_gl_mailbox_update(VirtualConsole *vc)
+{
+#ifdef CONFIG_GBM
+    QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
+    int fence_fd;
+    int width, height;
+
+    if (!dmabuf) {
+        return false;
+    }
+
+    /* renderer_blocked prevents another virtio-gpu flush reaching here. */
+    assert(!vc->gfx.mailbox_copy_pending);
+
+    width = qemu_dmabuf_get_width(dmabuf);
+    height = qemu_dmabuf_get_height(dmabuf);
+    if (vc->gfx.mailbox_fb.width != width ||
+        vc->gfx.mailbox_fb.height != height) {
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
+        egl_fb_setup_new_tex(&vc->gfx.mailbox_fb, width, height);
+    }
+
+    /* Preserve orientation; the draw path applies y0_top. */
+    egl_fb_blit(&vc->gfx.mailbox_fb, &vc->gfx.guest_fb, false);
+    egl_dmabuf_create_sync(dmabuf);
+
+    /* Hold the producer only until the private copy consumed the source. */
+    qemu_console_hw_gl_block(vc->gfx.dcl.con, true);
+    vc->gfx.mailbox_copy_pending = true;
+    vc->gfx.mailbox_dmabuf = dmabuf;
+    vc->gfx.mailbox_valid = true;
+    glFlush();
+    egl_dmabuf_create_fence(dmabuf);
+    fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
+    if (fence_fd >= 0) {
+        qemu_set_fd_handler(fence_fd, gd_hw_gl_flushed, NULL, vc);
+    } else {
+        /* A synchronous fallback is required for producer ordering. */
+        glFinish();
+        vc->gfx.mailbox_copy_pending = false;
+        vc->gfx.mailbox_dmabuf = NULL;
+        qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
+    }
+    return true;
+#else
+    return false;
+#endif
+}
+
 void gd_hw_gl_flushed(void *vcon)
 {
     VirtualConsole *vc = vcon;
-    QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
+    QemuDmaBuf *dmabuf = vc->gfx.mailbox_dmabuf;
     int fence_fd;
 
+    assert(vc->gfx.mailbox_copy_pending);
     fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
     if (fence_fd >= 0) {
         qemu_set_fd_handler(fence_fd, NULL, NULL, NULL);
         close(fence_fd);
         qemu_dmabuf_set_fence_fd(dmabuf, -1);
+        vc->gfx.mailbox_copy_pending = false;
+        vc->gfx.mailbox_dmabuf = NULL;
         qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
     }
 }
@@ -2662,7 +2714,22 @@ static void gd_vc_free(void *p)
             surface_gl_destroy_texture(vc->gfx.gls, vc->gfx.ds);
             qemu_gl_fini_shader(vc->gfx.gls);
         }
+        if (vc->gfx.mailbox_copy_pending) {
+            QemuDmaBuf *dmabuf = vc->gfx.mailbox_dmabuf;
+            int fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
+
+            if (fence_fd >= 0) {
+                qemu_set_fd_handler(fence_fd, NULL, NULL, NULL);
+                close(fence_fd);
+                qemu_dmabuf_set_fence_fd(dmabuf, -1);
+            }
+            glFinish();
+            vc->gfx.mailbox_copy_pending = false;
+            vc->gfx.mailbox_dmabuf = NULL;
+            qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
+        }
         egl_fb_destroy(&vc->gfx.guest_fb);
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
         egl_fb_destroy(&vc->gfx.win_fb);
         egl_fb_destroy(&vc->gfx.cursor_fb);
         if (vc->gfx.esurface) {

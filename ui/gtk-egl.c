@@ -35,6 +35,8 @@ static void gtk_egl_set_scanout_mode(VirtualConsole *vc, bool scanout)
         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                        vc->gfx.esurface, vc->gfx.ectx);
         egl_fb_destroy(&vc->gfx.guest_fb);
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
+        vc->gfx.mailbox_valid = false;
         if (vc->gfx.surface) {
             surface_gl_destroy_texture(vc->gfx.gls, vc->gfx.ds);
             surface_gl_create_texture(vc->gfx.gls, vc->gfx.ds);
@@ -66,10 +68,6 @@ void gd_egl_init(VirtualConsole *vc)
 void gd_egl_draw(VirtualConsole *vc)
 {
     GdkWindow *window;
-#ifdef CONFIG_GBM
-    QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
-    int fence_fd;
-#endif
     int ww, wh, pw, ph, gs;
 
     if (!vc->gfx.gls || !vc->gfx.ds) {
@@ -84,16 +82,9 @@ void gd_egl_draw(VirtualConsole *vc)
     ph = wh * gs;
 
     if (vc->gfx.scanout_mode) {
-#ifdef CONFIG_GBM
-        if (dmabuf) {
-            if (!qemu_dmabuf_get_draw_submitted(dmabuf)) {
-                return;
-            } else {
-                qemu_dmabuf_set_draw_submitted(dmabuf, false);
-            }
-            qemu_console_hw_gl_block(vc->gfx.dcl.con, true);
+        if (vc->gfx.guest_fb.dmabuf && !vc->gfx.mailbox_valid) {
+            return;
         }
-#endif
         gd_egl_scanout_flush(&vc->gfx.dcl, 0, 0, vc->gfx.w, vc->gfx.h);
 
         gd_update_scale(vc, ww, wh,
@@ -101,17 +92,6 @@ void gd_egl_draw(VirtualConsole *vc)
                         surface_height(vc->gfx.ds));
 
         glFlush();
-#ifdef CONFIG_GBM
-        if (dmabuf) {
-            egl_dmabuf_create_fence(dmabuf);
-            fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
-            if (fence_fd >= 0) {
-                qemu_set_fd_handler(fence_fd, gd_hw_gl_flushed, NULL, vc);
-                return;
-            }
-            qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
-        }
-#endif
     } else {
         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                        vc->gfx.esurface, vc->gfx.ectx);
@@ -169,12 +149,6 @@ void gd_egl_refresh(DisplayChangeListener *dcl)
             gd_egl_scanout_dmabuf(dcl, vc->gfx.guest_fb.dmabuf);
         }
 #endif
-    }
-
-    if (vc->gfx.guest_fb.dmabuf &&
-        qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
-        gd_egl_draw(vc);
-        return;
     }
 
     qemu_console_hw_update(dcl->con);
@@ -258,6 +232,8 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
                    vc->gfx.esurface, vc->gfx.ectx);
 
     gtk_egl_set_scanout_mode(vc, true);
+    egl_fb_destroy(&vc->gfx.mailbox_fb);
+    vc->gfx.mailbox_valid = false;
     egl_fb_setup_for_tex(&vc->gfx.guest_fb, backing_width, backing_height,
                          backing_id, false);
 }
@@ -340,12 +316,19 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
     int pw_widget, ph_widget, pw_surface, ph_surface;
     int ww_widget, wh_widget, ww_surface, wh_surface;
     int fbw, fbh;
+    egl_fb *scanout_fb = &vc->gfx.guest_fb;
 
     if (!vc->gfx.scanout_mode) {
         return;
     }
     if (!vc->gfx.guest_fb.framebuffer) {
         return;
+    }
+    if (vc->gfx.guest_fb.dmabuf) {
+        if (!vc->gfx.mailbox_valid) {
+            return;
+        }
+        scanout_fb = &vc->gfx.mailbox_fb;
     }
 
     eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
@@ -379,21 +362,15 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
     egl_fb_setup_default(&vc->gfx.win_fb, pw_surface, ph_surface,
                          px_offset, py_offset);
     if (vc->gfx.cursor_fb.texture) {
-        egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.guest_fb,
+        egl_texture_blit(vc->gfx.gls, &vc->gfx.win_fb, scanout_fb,
                          vc->gfx.y0_top);
         egl_texture_blend(vc->gfx.gls, &vc->gfx.win_fb, &vc->gfx.cursor_fb,
                           vc->gfx.y0_top,
                           vc->gfx.cursor_x, vc->gfx.cursor_y,
                           vc->gfx.scale_x, vc->gfx.scale_y);
     } else {
-        egl_fb_blit(&vc->gfx.win_fb, &vc->gfx.guest_fb, !vc->gfx.y0_top);
+        egl_fb_blit(&vc->gfx.win_fb, scanout_fb, !vc->gfx.y0_top);
     }
-
-#ifdef CONFIG_GBM
-    if (vc->gfx.guest_fb.dmabuf) {
-        egl_dmabuf_create_sync(vc->gfx.guest_fb.dmabuf);
-    }
-#endif
 
     eglSwapBuffers(qemu_egl_display, vc->gfx.esurface);
 }
@@ -404,9 +381,10 @@ void gd_egl_flush(DisplayChangeListener *dcl,
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
     GtkWidget *area = vc->gfx.drawing_area;
 
-    if (vc->gfx.guest_fb.dmabuf &&
-        !qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
-        qemu_dmabuf_set_draw_submitted(vc->gfx.guest_fb.dmabuf, true);
+    if (vc->gfx.guest_fb.dmabuf) {
+        eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
+                       vc->gfx.esurface, vc->gfx.ectx);
+        gd_gl_mailbox_update(vc);
         gtk_egl_set_scanout_mode(vc, true);
     }
 

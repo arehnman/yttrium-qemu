@@ -40,6 +40,7 @@
 #define MEMSLOT_GROUP_HOST  0
 #define MEMSLOT_GROUP_GUEST 1
 #define NUM_MEMSLOTS_GROUPS 2
+#define SPICE_GL_MAILBOX_SLOTS 2
 
 /*
  * Internal enum to differentiate between options for
@@ -118,24 +119,29 @@ struct SimpleSpiceDisplay {
 
 #ifdef HAVE_SPICE_GL
     /* opengl rendering */
-    QEMUBH *gl_unblock_bh;
-    QEMUTimer *gl_unblock_timer;
+    QEMUBH *gl_draw_done_bh;
     QemuGLShader *gls;
-    GLuint gl_surface_mem_obj;
     int gl_updates;
     bool have_scanout;
     bool have_surface;
 
     QemuDmaBuf *guest_dmabuf;
+    QemuDmaBuf *mailbox_dmabuf;
     bool guest_dmabuf_refresh;
-    bool render_cursor;
+    bool mailbox_copy_pending;
+    bool mailbox_disable_pending;
+    int mailbox_active;
+    int mailbox_pending;
+    int scanout_x;
+    int scanout_y;
+    int scanout_width;
+    int scanout_height;
 
     egl_fb guest_fb;
-    egl_fb blit_fb;
+    egl_fb mailbox_fb[SPICE_GL_MAILBOX_SLOTS];
+    GLuint mailbox_mem_obj[SPICE_GL_MAILBOX_SLOTS];
     egl_fb cursor_fb;
     bool backing_y_0_top;
-    bool blit_scanout_texture;
-    bool new_scanout_texture;
     bool have_hot;
 #endif
 };

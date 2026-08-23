@@ -28,6 +28,8 @@ static void gtk_gl_area_set_scanout_mode(VirtualConsole *vc, bool scanout)
     if (!vc->gfx.scanout_mode) {
         gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
         egl_fb_destroy(&vc->gfx.guest_fb);
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
+        vc->gfx.mailbox_valid = false;
         if (vc->gfx.surface) {
             surface_gl_destroy_texture(vc->gfx.gls, vc->gfx.ds);
             surface_gl_create_texture(vc->gfx.gls, vc->gfx.ds);
@@ -39,9 +41,7 @@ static void gtk_gl_area_set_scanout_mode(VirtualConsole *vc, bool scanout)
 
 void gd_gl_area_draw(VirtualConsole *vc)
 {
-#ifdef CONFIG_GBM
-    QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
-#endif
+    egl_fb *scanout_fb = &vc->gfx.guest_fb;
     int pw, ph, gs, y1, y2;
     int ww, wh;
     int ww_surface, wh_surface;
@@ -79,18 +79,14 @@ void gd_gl_area_draw(VirtualConsole *vc)
             return;
         }
 
-#ifdef CONFIG_GBM
-        if (dmabuf) {
-            if (!qemu_dmabuf_get_draw_submitted(dmabuf)) {
+        if (vc->gfx.guest_fb.dmabuf) {
+            if (!vc->gfx.mailbox_valid) {
                 return;
-            } else {
-                qemu_dmabuf_set_draw_submitted(dmabuf, false);
             }
-            qemu_console_hw_gl_block(vc->gfx.dcl.con, true);
+            scanout_fb = &vc->gfx.mailbox_fb;
         }
-#endif
 
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, vc->gfx.guest_fb.framebuffer);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, scanout_fb->framebuffer);
         /* GtkGLArea sets GL_DRAW_FRAMEBUFFER for us */
 
         if (wx_offset > 0) {
@@ -117,24 +113,7 @@ void gd_gl_area_draw(VirtualConsole *vc)
                           wx_offset * gs, wy_offset * gs,
                           (ww - wx_offset) * gs, (wh - wy_offset) * gs,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
-#ifdef CONFIG_GBM
-        if (dmabuf) {
-            egl_dmabuf_create_sync(dmabuf);
-        }
-#endif
         glFlush();
-#ifdef CONFIG_GBM
-        if (dmabuf) {
-            int fence_fd;
-            egl_dmabuf_create_fence(dmabuf);
-            fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
-            if (fence_fd >= 0) {
-                qemu_set_fd_handler(fence_fd, gd_hw_gl_flushed, NULL, vc);
-                return;
-            }
-            qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
-        }
-#endif
     } else {
         gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
 
@@ -309,6 +288,8 @@ void gd_gl_area_scanout_texture(DisplayChangeListener *dcl,
     }
 
     gtk_gl_area_set_scanout_mode(vc, true);
+    egl_fb_destroy(&vc->gfx.mailbox_fb);
+    vc->gfx.mailbox_valid = false;
     egl_fb_setup_for_tex(&vc->gfx.guest_fb, backing_width, backing_height,
                          backing_id, false);
 }
@@ -325,9 +306,9 @@ void gd_gl_area_scanout_flush(DisplayChangeListener *dcl,
 {
     VirtualConsole *vc = container_of(dcl, VirtualConsole, gfx.dcl);
 
-    if (vc->gfx.guest_fb.dmabuf &&
-        !qemu_dmabuf_get_draw_submitted(vc->gfx.guest_fb.dmabuf)) {
-        qemu_dmabuf_set_draw_submitted(vc->gfx.guest_fb.dmabuf, true);
+    if (vc->gfx.guest_fb.dmabuf) {
+        gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
+        gd_gl_mailbox_update(vc);
         gtk_gl_area_set_scanout_mode(vc, true);
     }
     gtk_gl_area_queue_render(GTK_GL_AREA(vc->gfx.drawing_area));
