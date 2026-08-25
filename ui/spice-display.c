@@ -1208,8 +1208,9 @@ static void spice_gl_snapshot(SimpleSpiceDisplay *ssd, egl_fb *src,
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->framebuffer);
     glViewport(0, 0, width, height);
     glClear(GL_COLOR_BUFFER_BIT);
-    y1 = y_0_top ? src_y : src_y + height;
-    y2 = y_0_top ? src_y + height : src_y;
+    /* Mailbox scanouts are exported with y_0_top set to false. */
+    y1 = y_0_top ? src_y + height : src_y;
+    y2 = y_0_top ? src_y : src_y + height;
     glBlitFramebuffer(src_x, y1, src_x + width, y2,
                       0, 0, width, height,
                       GL_COLOR_BUFFER_BIT, GL_LINEAR);
@@ -1254,7 +1255,7 @@ static void spice_gl_snapshot_surface(SimpleSpiceDisplay *ssd)
     egl_fb_setup_for_tex(&src, surface_width(ssd->ds),
                          surface_height(ssd->ds), ssd->ds->texture, false);
     spice_gl_snapshot(ssd, &src, 0, 0, src.width, src.height,
-                      true, NULL);
+                      false, NULL);
     egl_fb_destroy(&src);
     ssd->gl_updates = 0;
 }
