@@ -819,6 +819,8 @@ static void qemu_spice_gl_draw_done_bh(void *opaque)
     ssd->mailbox_active = -1;
     if (ssd->mailbox_disable_pending) {
         spice_gl_disable(ssd);
+    } else if (!spice_remote_client && !ssd->mailbox_copy_pending) {
+        spice_gl_present(ssd);
     }
 }
 
@@ -1178,6 +1180,15 @@ static void qemu_spice_gl_copy_done(void *opaque)
     qemu_dmabuf_set_fence_fd(dmabuf, -1);
     ssd->mailbox_copy_pending = false;
     ssd->mailbox_dmabuf = NULL;
+
+    /*
+     * Local clients are event driven.  Publish the completed copy before
+     * unblocking the renderer, otherwise queued flushes can start another
+     * copy and make the periodic display refresh miss the ready frame.
+     */
+    if (!spice_remote_client && !ssd->mailbox_disable_pending) {
+        spice_gl_present(ssd);
+    }
     qemu_console_hw_gl_block(ssd->dcl.con, false);
 }
 
