@@ -35,6 +35,12 @@ virtio_gpu_base_reset(VirtIOGPUBase *g)
         g->scanout[i].x = 0;
         g->scanout[i].y = 0;
         g->scanout[i].ds = NULL;
+
+        /*
+         * virtio-vga now uses VGA again. Its mode can be unchanged while
+         * the virtio scanout has replaced the console's display surface.
+         */
+        qemu_console_hw_invalidate(g->scanout[i].con);
     }
 }
 
