@@ -1016,7 +1016,13 @@ static void qemu_spice_cleanup(void)
     }
 
     qemu_spice_display_cleanup();
-    qemu_spice_input_cleanup();
+    /*
+     * Removing the inputs requires libspice-server1 with commit c3efe69e ("inputs: Fix keyboard and
+     * mouse state leaks on interface removal"), which is not part of any released version at the
+     * time of this writing. Cleanup here was newly added in QEMU 11.1 and did not happen at all in
+     * the past. Continue skipping the broken part for now.
+     */
+    //qemu_spice_input_cleanup();
     migration_remove_notifier(&migration_state);
     g_clear_pointer(&spice_consoles, g_slist_free);
     g_clear_pointer(&auth_passwd, g_free);
