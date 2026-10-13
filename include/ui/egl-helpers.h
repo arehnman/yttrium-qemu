@@ -37,6 +37,8 @@ void egl_fb_read(DisplaySurface *dst, egl_fb *src);
 void egl_fb_read_rect(DisplaySurface *dst, egl_fb *src, int x, int y, int w, int h);
 
 void egl_texture_blit(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip);
+bool egl_external_texture_blit(QemuGLShader *gls, egl_fb *dst,
+                               QemuDmaBuf *dmabuf, bool flip);
 void egl_texture_blend(QemuGLShader *gls, egl_fb *dst, egl_fb *src, bool flip,
                        int x, int y, double scale_x, double scale_y);
 

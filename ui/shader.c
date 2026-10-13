@@ -25,6 +25,7 @@
  * THE SOFTWARE.
  */
 #include "qemu/osdep.h"
+#include "qemu/error-report.h"
 #include <epoxy/gl.h>
 #include "ui/shader.h"
 
@@ -36,6 +37,11 @@ struct QemuGLShader {
     GLint texture_blit_prog;
     GLint texture_blit_flip_prog;
     GLint texture_blit_vao;
+    GLuint external_blit_prog;
+    GLuint external_blit_vao;
+    GLint external_blit_crop;
+    bool external_blit_initialized;
+    bool external_blit_validated;
 };
 
 /* ---------------------------------------------------------------------- */
@@ -148,6 +154,152 @@ end:
     return program;
 }
 
+static bool qemu_gl_init_external_texture_blit(QemuGLShader *gls)
+{
+    static const GLchar vert_src[] =
+        "#version 300 es\n"
+        "uniform highp vec4 crop;\n"
+        "out highp vec2 ex_tex_coord;\n"
+        "const vec2 positions[4] = vec2[4](vec2(-1.0, -1.0),\n"
+        "    vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));\n"
+        "void main() {\n"
+        "    vec2 position = positions[gl_VertexID];\n"
+        "    gl_Position = vec4(position, 0.0, 1.0);\n"
+        "    ex_tex_coord = crop.xy + (position + 1.0) * 0.5 * crop.zw;\n"
+        "}\n";
+    static const GLchar frag_src[] =
+        "#version 300 es\n"
+        "#extension GL_OES_EGL_image_external_essl3 : require\n"
+        "uniform lowp samplerExternalOES image;\n"
+        "in highp vec2 ex_tex_coord;\n"
+        "out mediump vec4 out_frag_color;\n"
+        "void main() {\n"
+        "    out_frag_color = texture(image, ex_tex_coord);\n"
+        "}\n";
+    GLint old_prog, image;
+
+    if (gls->external_blit_initialized) {
+        return gls->external_blit_prog != 0;
+    }
+    gls->external_blit_initialized = true;
+    /*
+     * Desktop GL can accept the ES shader extension without advertising the
+     * GLES extension strings.  Compile and validate against the actual source
+     * below; GLES contexts must advertise the external ES3 shader capability.
+     */
+    if (epoxy_is_desktop_gl() ?
+        (epoxy_gl_version() < 43 &&
+         !epoxy_has_gl_extension("GL_ARB_ES3_compatibility")) :
+        (!epoxy_has_gl_extension("GL_OES_EGL_image_external") ||
+         !epoxy_has_gl_extension("GL_OES_EGL_image_external_essl3"))) {
+        error_report("opengl: external DMA-BUF sampling requires "
+                     "ES3 external shader support in the current GL context");
+        return false;
+    }
+    gls->external_blit_prog = qemu_gl_create_compile_link_program(vert_src,
+                                                                frag_src);
+    if (!gls->external_blit_prog) {
+        error_report("opengl: external DMA-BUF copy shader creation failed");
+        return false;
+    }
+    gls->external_blit_crop = glGetUniformLocation(gls->external_blit_prog,
+                                                  "crop");
+    image = glGetUniformLocation(gls->external_blit_prog, "image");
+    glGenVertexArrays(1, &gls->external_blit_vao);
+    if (gls->external_blit_crop < 0 || image < 0 ||
+        !gls->external_blit_vao) {
+        error_report("opengl: external DMA-BUF copy shader has invalid "
+                     "uniforms or vertex array");
+        glDeleteProgram(gls->external_blit_prog);
+        gls->external_blit_prog = 0;
+        return false;
+    }
+    glGetIntegerv(GL_CURRENT_PROGRAM, &old_prog);
+    glUseProgram(gls->external_blit_prog);
+    glUniform1i(image, 0);
+    glUseProgram(old_prog);
+    return true;
+}
+
+/* The caller owns the destination framebuffer and viewport. */
+bool qemu_gl_run_external_texture_blit(QemuGLShader *gls, uint32_t texture,
+                                      const float crop[4])
+{
+    static const GLenum tests[] = {
+        GL_BLEND, GL_DEPTH_TEST, GL_STENCIL_TEST, GL_SCISSOR_TEST,
+        GL_CULL_FACE, GL_RASTERIZER_DISCARD,
+    };
+    GLboolean enabled[G_N_ELEMENTS(tests)], color_mask[4];
+    GLint program, vao, active, binding, sampler;
+    GLenum gl_error;
+    bool ok = true;
+    int i;
+
+    if (!qemu_gl_init_external_texture_blit(gls)) {
+        return false;
+    }
+    glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+    glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vao);
+    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+    glActiveTexture(GL_TEXTURE0);
+    glGetIntegerv(GL_TEXTURE_BINDING_EXTERNAL_OES, &binding);
+    glGetIntegerv(GL_SAMPLER_BINDING, &sampler);
+    glGetBooleanv(GL_COLOR_WRITEMASK, color_mask);
+    for (i = 0; i < G_N_ELEMENTS(tests); i++) {
+        enabled[i] = glIsEnabled(tests[i]);
+        glDisable(tests[i]);
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindSampler(0, 0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
+    glUseProgram(gls->external_blit_prog);
+    glUniform4fv(gls->external_blit_crop, 1, crop);
+    glBindVertexArray(gls->external_blit_vao);
+    if (!gls->external_blit_validated) {
+        GLint status, length;
+        g_autofree char *message = NULL;
+
+        glValidateProgram(gls->external_blit_prog);
+        glGetProgramiv(gls->external_blit_prog, GL_VALIDATE_STATUS, &status);
+        if (!status) {
+            glGetProgramiv(gls->external_blit_prog, GL_INFO_LOG_LENGTH, &length);
+            message = g_malloc0(MAX(length, 1));
+            glGetProgramInfoLog(gls->external_blit_prog, length, NULL, message);
+            error_report("opengl: external DMA-BUF copy shader validation "
+                         "failed with the source bound: %s", message);
+            ok = false;
+        } else {
+            gls->external_blit_validated = true;
+        }
+    }
+    if (ok) {
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+
+    glBindVertexArray(vao);
+    glUseProgram(program);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, binding);
+    glBindSampler(0, sampler);
+    glActiveTexture(active);
+    glColorMask(color_mask[0], color_mask[1], color_mask[2], color_mask[3]);
+    for (i = 0; i < G_N_ELEMENTS(tests); i++) {
+        if (enabled[i]) {
+            glEnable(tests[i]);
+        }
+    }
+    while ((gl_error = glGetError()) != GL_NO_ERROR) {
+        error_report("opengl: external DMA-BUF mailbox copy GL error 0x%x",
+                     gl_error);
+        ok = false;
+    }
+    if (!ok && !gls->external_blit_validated) {
+        /* Cache a failed initialization/validation instead of retrying it. */
+        glDeleteProgram(gls->external_blit_prog);
+        gls->external_blit_prog = 0;
+    }
+    return ok;
+}
+
 /* ---------------------------------------------------------------------- */
 
 QemuGLShader *qemu_gl_init_shader(void)
@@ -176,5 +328,7 @@ void qemu_gl_fini_shader(QemuGLShader *gls)
     glDeleteProgram(gls->texture_blit_prog);
     glDeleteProgram(gls->texture_blit_flip_prog);
     glDeleteProgram(gls->texture_blit_vao);
+    glDeleteProgram(gls->external_blit_prog);
+    glDeleteVertexArrays(1, &gls->external_blit_vao);
     g_free(gls);
 }

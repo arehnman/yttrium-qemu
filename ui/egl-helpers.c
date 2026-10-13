@@ -321,6 +321,62 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
     return true;
 }
 
+bool egl_external_texture_blit(QemuGLShader *gls, egl_fb *dst,
+                               QemuDmaBuf *dmabuf, bool flip)
+{
+    uint32_t bw = qemu_dmabuf_get_backing_width(dmabuf);
+    uint32_t bh = qemu_dmabuf_get_backing_height(dmabuf);
+    uint32_t x = qemu_dmabuf_get_x(dmabuf);
+    uint32_t y = qemu_dmabuf_get_y(dmabuf);
+    uint32_t w = qemu_dmabuf_get_width(dmabuf);
+    uint32_t h = qemu_dmabuf_get_height(dmabuf);
+    GLint read_fb, draw_fb, viewport[4];
+    GLenum status;
+    GLenum gl_error;
+    float crop[4];
+    bool ok;
+
+    if (!gls || !bw || !bh || x >= bw || y >= bh ||
+        !w || !h || w > bw - x || h > bh - y) {
+        error_report("egl: invalid external DMA-BUF scanout/crop");
+        return false;
+    }
+
+    while ((gl_error = glGetError()) != GL_NO_ERROR) {
+        error_report("egl: pre-existing GL error 0x%x before external "
+                     "DMA-BUF mailbox copy", gl_error);
+    }
+
+    crop[0] = (float)x / bw;
+    crop[1] = (float)y / bh;
+    crop[2] = (float)w / bw;
+    crop[3] = (float)h / bh;
+    if (flip) {
+        crop[1] += crop[3];
+        crop[3] = -crop[3];
+    }
+
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb);
+    glGetIntegerv(GL_VIEWPORT, viewport);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->framebuffer);
+    status = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        error_report("egl: external DMA-BUF mailbox framebuffer incomplete "
+                     "(0x%x)", status);
+        ok = false;
+    } else {
+        glViewport(0, 0, dst->width, dst->height);
+        ok = qemu_gl_run_external_texture_blit(gls,
+                                              qemu_dmabuf_get_texture(dmabuf),
+                                              crop);
+    }
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, read_fb);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_fb);
+    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+    return ok;
+}
+
 static bool egl_dmabuf_texture_target(QemuDmaBuf *dmabuf, bool allow_external,
                                       GLenum *target)
 {
