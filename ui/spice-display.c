@@ -1203,6 +1203,7 @@ static void spice_gl_snapshot(SimpleSpiceDisplay *ssd, egl_fb *src,
     int ptr_x, ptr_y;
     int slot = spice_gl_mailbox_next(ssd);
     int y1, y2;
+    bool copied = true;
 
     assert(!ssd->mailbox_copy_pending);
     dst = &ssd->mailbox_fb[slot];
@@ -1217,18 +1218,23 @@ static void spice_gl_snapshot(SimpleSpiceDisplay *ssd, egl_fb *src,
         egl_fb_setup_new_tex(dst, width, height);
     }
 
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, src->framebuffer);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->framebuffer);
-    glViewport(0, 0, width, height);
-    glClear(GL_COLOR_BUFFER_BIT);
     /* Mailbox scanouts are exported with y_0_top set to false. */
-    y1 = y_0_top ? src_y + height : src_y;
-    y2 = y_0_top ? src_y : src_y + height;
-    glBlitFramebuffer(src_x, y1, src_x + width, y2,
-                      0, 0, width, height,
-                      GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    if (dmabuf &&
+        qemu_dmabuf_get_texture_target(dmabuf) == GL_TEXTURE_EXTERNAL_OES) {
+        copied = egl_external_texture_blit(ssd->gls, dst, dmabuf, y_0_top);
+    } else {
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, src->framebuffer);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->framebuffer);
+        glViewport(0, 0, width, height);
+        glClear(GL_COLOR_BUFFER_BIT);
+        y1 = y_0_top ? src_y + height : src_y;
+        y2 = y_0_top ? src_y : src_y + height;
+        glBlitFramebuffer(src_x, y1, src_x + width, y2,
+                          0, 0, width, height,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
 
-    if (ssd->cursor_fb.texture) {
+    if (copied && ssd->cursor_fb.texture) {
         qemu_mutex_lock(&ssd->lock);
         ptr_x = ssd->ptr_x;
         ptr_y = ssd->ptr_y;
@@ -1237,7 +1243,8 @@ static void spice_gl_snapshot(SimpleSpiceDisplay *ssd, egl_fb *src,
                           !y_0_top, ptr_x, ptr_y, 1.0, 1.0);
     }
 
-    ssd->mailbox_pending = slot;
+    /* A failed shader copy must not publish a partially updated mailbox. */
+    ssd->mailbox_pending = copied ? slot : -1;
     if (!dmabuf) {
         /* Shared-texture scanouts have no native dma-buf fence carrier. */
         glFinish();
@@ -1280,12 +1287,12 @@ static void qemu_spice_gl_update(DisplayChangeListener *dcl,
     QemuDmaBuf *dmabuf = ssd->guest_dmabuf;
     uint32_t texture;
 
-    if (!ssd->have_scanout) {
+    if (!ssd->have_scanout || (!dmabuf && !ssd->guest_fb.framebuffer)) {
         return;
     }
 
     if (ssd->guest_dmabuf_refresh) {
-        if (!egl_dmabuf_import_texture(dmabuf, false)) {
+        if (!egl_dmabuf_import_texture(dmabuf, true)) {
             return;
         }
         texture = qemu_dmabuf_get_texture(dmabuf);
@@ -1293,10 +1300,13 @@ static void qemu_spice_gl_update(DisplayChangeListener *dcl,
             return;
         }
         egl_fb_destroy(&ssd->guest_fb);
-        egl_fb_setup_for_tex(&ssd->guest_fb,
-                             qemu_dmabuf_get_backing_width(dmabuf),
-                             qemu_dmabuf_get_backing_height(dmabuf),
-                             texture, false);
+        /* External textures can only be sampled, never attached to an FBO. */
+        if (qemu_dmabuf_get_texture_target(dmabuf) == GL_TEXTURE_2D) {
+            egl_fb_setup_for_tex(&ssd->guest_fb,
+                                 qemu_dmabuf_get_backing_width(dmabuf),
+                                 qemu_dmabuf_get_backing_height(dmabuf),
+                                 texture, false);
+        }
         ssd->guest_dmabuf_refresh = false;
     }
 
