@@ -35,6 +35,8 @@ static void gtk_egl_set_scanout_mode(VirtualConsole *vc, bool scanout)
         eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                        vc->gfx.esurface, vc->gfx.ectx);
         egl_fb_destroy(&vc->gfx.guest_fb);
+        vc->gfx.guest_fb.dmabuf = NULL;
+        vc->gfx.guest_fb.texture = 0;
         egl_fb_destroy(&vc->gfx.mailbox_fb);
         vc->gfx.mailbox_valid = false;
         if (vc->gfx.surface) {
@@ -232,6 +234,7 @@ void gd_egl_scanout_texture(DisplayChangeListener *dcl,
                    vc->gfx.esurface, vc->gfx.ectx);
 
     gtk_egl_set_scanout_mode(vc, true);
+    vc->gfx.guest_fb.dmabuf = NULL;
     egl_fb_destroy(&vc->gfx.mailbox_fb);
     vc->gfx.mailbox_valid = false;
     egl_fb_setup_for_tex(&vc->gfx.guest_fb, backing_width, backing_height,
@@ -246,10 +249,17 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
     uint32_t x, y, width, height, backing_width, backing_height, texture;
     bool y0_top;
 
+    if (!vc->gfx.esurface) {
+        gd_egl_init(vc);
+        if (!vc->gfx.esurface) {
+            return;
+        }
+    }
     eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                    vc->gfx.esurface, vc->gfx.ectx);
 
-    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+    if (!egl_dmabuf_import_texture(dmabuf, true)) {
+        gtk_egl_set_scanout_mode(vc, false);
         return;
     }
     texture = qemu_dmabuf_get_texture(dmabuf);
@@ -265,8 +275,33 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
     backing_height = qemu_dmabuf_get_backing_height(dmabuf);
     y0_top = qemu_dmabuf_get_y0_top(dmabuf);
 
-    gd_egl_scanout_texture(dcl, texture, y0_top, backing_width, backing_height,
-                           x, y, width, height, NULL);
+    if (qemu_dmabuf_get_texture_target(dmabuf) == GL_TEXTURE_EXTERNAL_OES) {
+        if (!qemu_dmabuf_get_allow_fences(dmabuf)) {
+            error_report("gtk: external DMA-BUF scanout requires producer "
+                         "fences for the GPU mailbox copy");
+            gtk_egl_set_scanout_mode(vc, false);
+            return;
+        }
+        if (!vc->gfx.gls) {
+            vc->gfx.gls = qemu_gl_init_shader();
+        }
+        vc->gfx.x = x;
+        vc->gfx.y = y;
+        vc->gfx.w = width;
+        vc->gfx.h = height;
+        vc->gfx.y0_top = y0_top;
+        gtk_egl_set_scanout_mode(vc, true);
+        egl_fb_destroy(&vc->gfx.guest_fb);
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
+        vc->gfx.mailbox_valid = false;
+        /* External textures may be sampled, never attached to a framebuffer. */
+        vc->gfx.guest_fb.width = backing_width;
+        vc->gfx.guest_fb.height = backing_height;
+        vc->gfx.guest_fb.texture = texture;
+    } else {
+        gd_egl_scanout_texture(dcl, texture, y0_top, backing_width, backing_height,
+                               x, y, width, height, NULL);
+    }
 
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;
@@ -325,7 +360,7 @@ void gd_egl_scanout_flush(DisplayChangeListener *dcl,
     if (!vc->gfx.scanout_mode) {
         return;
     }
-    if (!vc->gfx.guest_fb.framebuffer) {
+    if (!vc->gfx.guest_fb.framebuffer && !vc->gfx.guest_fb.dmabuf) {
         return;
     }
     if (vc->gfx.guest_fb.dmabuf) {

@@ -9,6 +9,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu/error-report.h"
 
 #include "trace.h"
 
@@ -28,6 +29,8 @@ static void gtk_gl_area_set_scanout_mode(VirtualConsole *vc, bool scanout)
     if (!vc->gfx.scanout_mode) {
         gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
         egl_fb_destroy(&vc->gfx.guest_fb);
+        vc->gfx.guest_fb.dmabuf = NULL;
+        vc->gfx.guest_fb.texture = 0;
         egl_fb_destroy(&vc->gfx.mailbox_fb);
         vc->gfx.mailbox_valid = false;
         if (vc->gfx.surface) {
@@ -75,7 +78,7 @@ void gd_gl_area_draw(VirtualConsole *vc)
     }
 
     if (vc->gfx.scanout_mode) {
-        if (!vc->gfx.guest_fb.framebuffer) {
+        if (!vc->gfx.guest_fb.framebuffer && !vc->gfx.guest_fb.dmabuf) {
             return;
         }
 
@@ -288,6 +291,7 @@ void gd_gl_area_scanout_texture(DisplayChangeListener *dcl,
     }
 
     gtk_gl_area_set_scanout_mode(vc, true);
+    vc->gfx.guest_fb.dmabuf = NULL;
     egl_fb_destroy(&vc->gfx.mailbox_fb);
     vc->gfx.mailbox_valid = false;
     egl_fb_setup_for_tex(&vc->gfx.guest_fb, backing_width, backing_height,
@@ -323,7 +327,8 @@ void gd_gl_area_scanout_dmabuf(DisplayChangeListener *dcl,
     bool y0_top;
 
     gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
-    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+    if (!egl_dmabuf_import_texture(dmabuf, true)) {
+        gtk_gl_area_set_scanout_mode(vc, false);
         return;
     }
     texture = qemu_dmabuf_get_texture(dmabuf);
@@ -339,9 +344,34 @@ void gd_gl_area_scanout_dmabuf(DisplayChangeListener *dcl,
     backing_height = qemu_dmabuf_get_backing_height(dmabuf);
     y0_top = qemu_dmabuf_get_y0_top(dmabuf);
 
-    gd_gl_area_scanout_texture(dcl, texture, y0_top,
-                               backing_width, backing_height,
-                               x, y, width, height, NULL);
+    if (qemu_dmabuf_get_texture_target(dmabuf) == GL_TEXTURE_EXTERNAL_OES) {
+        if (!qemu_dmabuf_get_allow_fences(dmabuf)) {
+            error_report("gtk: external DMA-BUF scanout requires producer "
+                         "fences for the GPU mailbox copy");
+            gtk_gl_area_set_scanout_mode(vc, false);
+            return;
+        }
+        if (!vc->gfx.gls) {
+            vc->gfx.gls = qemu_gl_init_shader();
+        }
+        vc->gfx.x = x;
+        vc->gfx.y = y;
+        vc->gfx.w = width;
+        vc->gfx.h = height;
+        vc->gfx.y0_top = y0_top;
+        gtk_gl_area_set_scanout_mode(vc, true);
+        egl_fb_destroy(&vc->gfx.guest_fb);
+        egl_fb_destroy(&vc->gfx.mailbox_fb);
+        vc->gfx.mailbox_valid = false;
+        /* External textures may be sampled, never attached to a framebuffer. */
+        vc->gfx.guest_fb.width = backing_width;
+        vc->gfx.guest_fb.height = backing_height;
+        vc->gfx.guest_fb.texture = texture;
+    } else {
+        gd_gl_area_scanout_texture(dcl, texture, y0_top,
+                                   backing_width, backing_height,
+                                   x, y, width, height, NULL);
+    }
 
     if (qemu_dmabuf_get_allow_fences(dmabuf)) {
         vc->gfx.guest_fb.dmabuf = dmabuf;

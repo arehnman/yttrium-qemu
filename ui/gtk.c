@@ -603,6 +603,7 @@ bool gd_gl_mailbox_update(VirtualConsole *vc)
     QemuDmaBuf *dmabuf = vc->gfx.guest_fb.dmabuf;
     int fence_fd;
     int width, height;
+    bool copied = true;
 
     if (!dmabuf) {
         return false;
@@ -620,14 +621,19 @@ bool gd_gl_mailbox_update(VirtualConsole *vc)
     }
 
     /* Preserve orientation; the draw path applies y0_top. */
-    egl_fb_blit(&vc->gfx.mailbox_fb, &vc->gfx.guest_fb, false);
+    if (qemu_dmabuf_get_texture_target(dmabuf) == GL_TEXTURE_EXTERNAL_OES) {
+        copied = egl_external_texture_blit(vc->gfx.gls, &vc->gfx.mailbox_fb,
+                                           dmabuf, false);
+    } else {
+        egl_fb_blit(&vc->gfx.mailbox_fb, &vc->gfx.guest_fb, false);
+    }
     egl_dmabuf_create_sync(dmabuf);
 
     /* Hold the producer only until the private copy consumed the source. */
     qemu_console_hw_gl_block(vc->gfx.dcl.con, true);
     vc->gfx.mailbox_copy_pending = true;
     vc->gfx.mailbox_dmabuf = dmabuf;
-    vc->gfx.mailbox_valid = true;
+    vc->gfx.mailbox_valid = copied;
     glFlush();
     egl_dmabuf_create_fence(dmabuf);
     fence_fd = qemu_dmabuf_get_fence_fd(dmabuf);
@@ -635,12 +641,15 @@ bool gd_gl_mailbox_update(VirtualConsole *vc)
         qemu_set_fd_handler(fence_fd, gd_hw_gl_flushed, NULL, vc);
     } else {
         /* A synchronous fallback is required for producer ordering. */
+        warn_report("gtk: GPU mailbox synchronization uses the synchronous "
+                    "glFinish fallback because no native producer-release "
+                    "fence FD was created");
         glFinish();
         vc->gfx.mailbox_copy_pending = false;
         vc->gfx.mailbox_dmabuf = NULL;
         qemu_console_hw_gl_block(vc->gfx.dcl.con, false);
     }
-    return true;
+    return copied;
 #else
     return false;
 #endif
