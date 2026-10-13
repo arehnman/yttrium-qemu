@@ -648,7 +648,9 @@ static void dbus_cursor_dmabuf(DisplayChangeListener *dcl,
 
     ddl_discard_cursor_messages(ddl);
 
-    egl_dmabuf_import_texture(dmabuf);
+    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+        return;
+    }
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
         return;

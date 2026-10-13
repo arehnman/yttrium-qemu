@@ -323,7 +323,9 @@ void gd_gl_area_scanout_dmabuf(DisplayChangeListener *dcl,
     bool y0_top;
 
     gtk_gl_area_make_current(GTK_GL_AREA(vc->gfx.drawing_area));
-    egl_dmabuf_import_texture(dmabuf);
+    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+        return;
+    }
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
         return;

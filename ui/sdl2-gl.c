@@ -263,8 +263,7 @@ void sdl2_gl_scanout_dmabuf(DisplayChangeListener *dcl,
     assert(scon->opengl);
     SDL_GL_MakeCurrent(scon->real_window, scon->winctx);
 
-    egl_dmabuf_import_texture(dmabuf);
-    if (!qemu_dmabuf_get_texture(dmabuf)) {
+    if (!egl_dmabuf_import_texture(dmabuf, false)) {
         fds = qemu_dmabuf_get_fds(dmabuf, NULL);
         error_report("%s: failed fd=%d", __func__, fds ? fds[0] : -1);
         return;

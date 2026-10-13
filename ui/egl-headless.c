@@ -88,7 +88,9 @@ static void egl_scanout_dmabuf(DisplayChangeListener *dcl,
 {
     uint32_t width, height, texture;
 
-    egl_dmabuf_import_texture(dmabuf);
+    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+        return;
+    }
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
         return;
@@ -109,7 +111,9 @@ static void egl_cursor_dmabuf(DisplayChangeListener *dcl,
     egl_dpy *edpy = container_of(dcl, egl_dpy, dcl);
 
     if (dmabuf) {
-        egl_dmabuf_import_texture(dmabuf);
+        if (!egl_dmabuf_import_texture(dmabuf, false)) {
+            return;
+        }
         texture = qemu_dmabuf_get_texture(dmabuf);
         if (!texture) {
             return;

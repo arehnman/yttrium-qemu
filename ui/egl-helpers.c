@@ -321,7 +321,59 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
     return true;
 }
 
-void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
+static bool egl_dmabuf_texture_target(QemuDmaBuf *dmabuf, bool allow_external,
+                                      GLenum *target)
+{
+    uint64_t modifier = qemu_dmabuf_get_modifier(dmabuf);
+    uint32_t fourcc = qemu_dmabuf_get_fourcc(dmabuf);
+    g_autofree EGLuint64KHR *modifiers = NULL;
+    g_autofree EGLBoolean *external_only = NULL;
+    EGLint count, i;
+
+    *target = GL_TEXTURE_2D;
+    /* INVALID is implementation-defined, not a synonym for linear. */
+    if (modifier == DRM_FORMAT_MOD_INVALID ||
+        !epoxy_has_egl_extension(qemu_egl_display,
+                                "EGL_EXT_image_dma_buf_import_modifiers")) {
+        return true;
+    }
+
+    if (!eglQueryDmaBufModifiersEXT(qemu_egl_display, fourcc, 0, NULL, NULL,
+                                    &count)) {
+        error_report("egl: querying DMA-BUF modifiers for fourcc 0x%x failed: "
+                     "%s", fourcc, qemu_egl_get_error_string());
+        return false;
+    }
+    modifiers = g_new(EGLuint64KHR, count);
+    external_only = g_new(EGLBoolean, count);
+    if (!eglQueryDmaBufModifiersEXT(qemu_egl_display, fourcc, count,
+                                    modifiers, external_only, &count)) {
+        error_report("egl: querying DMA-BUF modifier targets failed: %s",
+                     qemu_egl_get_error_string());
+        return false;
+    }
+    for (i = 0; i < count; i++) {
+        if (modifiers[i] != modifier) {
+            continue;
+        }
+        if (!external_only[i]) {
+            return true;
+        }
+        if (!allow_external) {
+            error_report("egl: DMA-BUF fourcc 0x%x modifier 0x%" PRIx64
+                         " requires an external texture; consumer requires "
+                         "a 2D framebuffer texture", fourcc, modifier);
+            return false;
+        }
+        *target = GL_TEXTURE_EXTERNAL_OES;
+        return true;
+    }
+    error_report("egl: unsupported DMA-BUF fourcc 0x%x modifier 0x%" PRIx64,
+                 fourcc, modifier);
+    return false;
+}
+
+bool egl_dmabuf_import_texture(QemuDmaBuf *dmabuf, bool allow_external)
 {
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     EGLint attrs[64];
@@ -333,6 +385,8 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     const uint32_t *offsets = qemu_dmabuf_get_offsets(dmabuf, &noffsets);
     const uint32_t *strides = qemu_dmabuf_get_strides(dmabuf, &nstrides);
     uint32_t num_planes = qemu_dmabuf_get_num_planes(dmabuf);
+    GLenum target, gl_error;
+    bool failed = false;
 
     EGLint fd_attrs[] = {
         EGL_DMA_BUF_PLANE0_FD_EXT,
@@ -366,7 +420,20 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
     };
 
     if (texture != 0) {
-        return;
+        if (!allow_external &&
+            qemu_dmabuf_get_texture_target(dmabuf) != GL_TEXTURE_2D) {
+            error_report("egl: consumer requires a 2D texture but cached "
+                         "DMA-BUF texture uses an external target");
+            return false;
+        }
+        return true;
+    }
+    if (!egl_dmabuf_texture_target(dmabuf, allow_external, &target)) {
+        return false;
+    }
+    while ((gl_error = glGetError()) != GL_NO_ERROR) {
+        error_report("egl: pre-existing GL error 0x%x before DMA-BUF "
+                     "texture import", gl_error);
     }
 
     assert(nfds >= num_planes);
@@ -403,18 +470,34 @@ void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf)
                               EGL_LINUX_DMA_BUF_EXT,
                               NULL, attrs);
     if (image == EGL_NO_IMAGE_KHR) {
-        error_report("eglCreateImageKHR failed");
-        return;
+        error_report("egl: DMA-BUF eglCreateImageKHR failed: %s",
+                     qemu_egl_get_error_string());
+        return false;
     }
 
     glGenTextures(1, &texture);
-    qemu_dmabuf_set_texture(dmabuf, texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindTexture(target, texture);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    if (target == GL_TEXTURE_EXTERNAL_OES) {
+        glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
 
-    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)image);
+    glEGLImageTargetTexture2DOES(target, (GLeglImageOES)image);
     eglDestroyImageKHR(qemu_egl_display, image);
+    while ((gl_error = glGetError()) != GL_NO_ERROR) {
+        error_report("egl: DMA-BUF texture import target 0x%x GL error 0x%x",
+                     target, gl_error);
+        failed = true;
+    }
+    if (failed) {
+        glDeleteTextures(1, &texture);
+        return false;
+    }
+    qemu_dmabuf_set_texture(dmabuf, texture);
+    qemu_dmabuf_set_texture_target(dmabuf, target);
+    return true;
 }
 
 void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)
@@ -428,6 +511,7 @@ void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf)
 
     glDeleteTextures(1, &texture);
     qemu_dmabuf_set_texture(dmabuf, 0);
+    qemu_dmabuf_set_texture_target(dmabuf, 0);
 }
 
 void egl_dmabuf_create_sync(QemuDmaBuf *dmabuf)

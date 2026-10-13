@@ -993,7 +993,9 @@ static void qemu_spice_gl_cursor_dmabuf(DisplayChangeListener *dcl,
 
     trace_qemu_spice_gl_cursor(ssd->qxl.id, dmabuf != NULL, have_hot);
     if (dmabuf) {
-        egl_dmabuf_import_texture(dmabuf);
+        if (!egl_dmabuf_import_texture(dmabuf, false)) {
+            return;
+        }
         texture = qemu_dmabuf_get_texture(dmabuf);
         if (!texture) {
             return;
@@ -1283,7 +1285,9 @@ static void qemu_spice_gl_update(DisplayChangeListener *dcl,
     }
 
     if (ssd->guest_dmabuf_refresh) {
-        egl_dmabuf_import_texture(dmabuf);
+        if (!egl_dmabuf_import_texture(dmabuf, false)) {
+            return;
+        }
         texture = qemu_dmabuf_get_texture(dmabuf);
         if (!texture) {
             return;

@@ -52,7 +52,7 @@ bool egl_dmabuf_export_texture(uint32_t tex_id, int *fd, EGLint *offset,
                                EGLint *stride, EGLint *fourcc, int *num_planes,
                                EGLuint64KHR *modifier);
 
-void egl_dmabuf_import_texture(QemuDmaBuf *dmabuf);
+bool egl_dmabuf_import_texture(QemuDmaBuf *dmabuf, bool allow_external);
 void egl_dmabuf_release_texture(QemuDmaBuf *dmabuf);
 void egl_dmabuf_create_sync(QemuDmaBuf *dmabuf);
 void egl_dmabuf_create_fence(QemuDmaBuf *dmabuf);

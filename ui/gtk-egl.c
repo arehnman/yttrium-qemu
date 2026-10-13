@@ -249,7 +249,9 @@ void gd_egl_scanout_dmabuf(DisplayChangeListener *dcl,
     eglMakeCurrent(qemu_egl_display, vc->gfx.esurface,
                    vc->gfx.esurface, vc->gfx.ectx);
 
-    egl_dmabuf_import_texture(dmabuf);
+    if (!egl_dmabuf_import_texture(dmabuf, false)) {
+        return;
+    }
     texture = qemu_dmabuf_get_texture(dmabuf);
     if (!texture) {
         return;
@@ -281,7 +283,9 @@ void gd_egl_cursor_dmabuf(DisplayChangeListener *dcl,
     uint32_t backing_width, backing_height, texture;
 
     if (dmabuf) {
-        egl_dmabuf_import_texture(dmabuf);
+        if (!egl_dmabuf_import_texture(dmabuf, false)) {
+            return;
+        }
         texture = qemu_dmabuf_get_texture(dmabuf);
         if (!texture) {
             return;
