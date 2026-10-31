@@ -1261,6 +1261,8 @@ static void virtio_gpu_virgl_async_fence_bh(void *opaque)
                 if (cmd->cmd_hdr.ctx_id != f->ctx_id) {
                     continue;
                 }
+            } else if (f->ctx_id != 0 || f->ring_idx != UINT32_MAX) {
+                continue;
             }
             virtio_gpu_ctrl_response_nodata(g, cmd, VIRTIO_GPU_RESP_OK_NODATA);
             QTAILQ_REMOVE(&g->fenceq, cmd, next);
