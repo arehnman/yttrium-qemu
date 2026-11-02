@@ -38,7 +38,6 @@ struct QemuGLShader {
     GLint texture_blit_flip_prog;
     GLint texture_blit_vao;
     GLuint external_blit_prog;
-    GLuint external_blit_vao;
     GLint external_blit_crop;
     bool external_blit_initialized;
     bool external_blit_validated;
@@ -205,11 +204,9 @@ static bool qemu_gl_init_external_texture_blit(QemuGLShader *gls)
     gls->external_blit_crop = glGetUniformLocation(gls->external_blit_prog,
                                                   "crop");
     image = glGetUniformLocation(gls->external_blit_prog, "image");
-    glGenVertexArrays(1, &gls->external_blit_vao);
-    if (gls->external_blit_crop < 0 || image < 0 ||
-        !gls->external_blit_vao) {
+    if (gls->external_blit_crop < 0 || image < 0) {
         error_report("opengl: external DMA-BUF copy shader has invalid "
-                     "uniforms or vertex array");
+                     "uniforms");
         glDeleteProgram(gls->external_blit_prog);
         gls->external_blit_prog = 0;
         return false;
@@ -231,11 +228,21 @@ bool qemu_gl_run_external_texture_blit(QemuGLShader *gls, uint32_t texture,
     };
     GLboolean enabled[G_N_ELEMENTS(tests)], color_mask[4];
     GLint program, vao, active, binding, sampler;
+    GLuint copy_vao = 0;
     GLenum gl_error;
     bool ok = true;
     int i;
 
     if (!qemu_gl_init_external_texture_blit(gls)) {
+        return false;
+    }
+    /*
+     * VAOs are context-local; renderer reset can replace the current context.
+     */
+    glGenVertexArrays(1, &copy_vao);
+    if (!copy_vao) {
+        error_report("opengl: external DMA-BUF copy vertex array creation "
+                     "failed");
         return false;
     }
     glGetIntegerv(GL_CURRENT_PROGRAM, &program);
@@ -254,7 +261,7 @@ bool qemu_gl_run_external_texture_blit(QemuGLShader *gls, uint32_t texture,
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, texture);
     glUseProgram(gls->external_blit_prog);
     glUniform4fv(gls->external_blit_crop, 1, crop);
-    glBindVertexArray(gls->external_blit_vao);
+    glBindVertexArray(copy_vao);
     if (!gls->external_blit_validated) {
         GLint status, length;
         g_autofree char *message = NULL;
@@ -277,6 +284,7 @@ bool qemu_gl_run_external_texture_blit(QemuGLShader *gls, uint32_t texture,
     }
 
     glBindVertexArray(vao);
+    glDeleteVertexArrays(1, &copy_vao);
     glUseProgram(program);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, binding);
     glBindSampler(0, sampler);
@@ -329,6 +337,5 @@ void qemu_gl_fini_shader(QemuGLShader *gls)
     glDeleteProgram(gls->texture_blit_flip_prog);
     glDeleteProgram(gls->texture_blit_vao);
     glDeleteProgram(gls->external_blit_prog);
-    glDeleteVertexArrays(1, &gls->external_blit_vao);
     g_free(gls);
 }
